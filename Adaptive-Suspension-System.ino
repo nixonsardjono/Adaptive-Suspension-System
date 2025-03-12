@@ -1,61 +1,61 @@
 #include <Wire.h>
-#include <PID_v1.h>
 #include <Servo.h>
 
-// Sensor dan Actuator
-const int imuAddress = 0x68; // Alamat I2C IMU Sensor
-Servo bypassShock; 
-int pneumaticValve = 9; // Kontrol aktuator pneumatic
+#define HEIGHT_SENSOR A0
+#define PRESSURE_SENSOR A1
+#define BUTTON_PIN 2
+#define RELAY_COILOVERS 3
+#define RELAY_BYPASS 4
+#define PNEUMATIC_ACTUATOR 5
 
-// PID Control untuk damping dan ride height
-double Setpoint, Input, Output;
-double Kp=2, Ki=5, Kd=1;
-PID myPID(&Input, &Output, &Setpoint, Kp, Ki, Kd, DIRECT);
+Servo bypassServo;
+int heightValue, pressureValue;
+bool suspensionMode = false;
 
 void setup() {
     Serial.begin(9600);
-    Wire.begin();
-    bypassShock.attach(6); // PWM pin untuk motorized bypass shock
-
-    // Setup PID Controller
-    myPID.SetMode(AUTOMATIC);
-    myPID.SetOutputLimits(0, 180); // Untuk kontrol servo damping
-    pinMode(pneumaticValve, OUTPUT);
+    pinMode(BUTTON_PIN, INPUT_PULLUP);
+    pinMode(RELAY_COILOVERS, OUTPUT);
+    pinMode(RELAY_BYPASS, OUTPUT);
+    pinMode(PNEUMATIC_ACTUATOR, OUTPUT);
+    bypassServo.attach(6);
 }
 
 void loop() {
-    // Baca data IMU sensor
-    Wire.beginTransmission(imuAddress);
-    Wire.write(0x3B);  
-    Wire.endTransmission(false);
-    Wire.requestFrom(imuAddress, 6, true);  
+    heightValue = analogRead(HEIGHT_SENSOR);
+    pressureValue = analogRead(PRESSURE_SENSOR);
 
-    int16_t accelX = Wire.read() << 8 | Wire.read();
-    int16_t accelY = Wire.read() << 8 | Wire.read();
-    int16_t accelZ = Wire.read() << 8 | Wire.read();
+    Serial.print("Height: ");
+    Serial.print(heightValue);
+    Serial.print(" | Pressure: ");
+    Serial.println(pressureValue);
 
-    // Konversi data IMU menjadi g-force
-    float gForceX = accelX / 16384.0;
-    float gForceY = accelY / 16384.0;
-    float gForceZ = accelZ / 16384.0;
+    if (digitalRead(BUTTON_PIN) == LOW) {
+        suspensionMode = !suspensionMode;
+        delay(500);
+    }
 
-    // Hitung kemiringan kendaraan
-    float tiltAngle = atan2(gForceY, gForceZ) * 180.0 / PI;
-
-    // Setpoint untuk PID Controller
-    Setpoint = 0; 
-    Input = tiltAngle;
-    myPID.Compute();
-
-    // Kontrol bypass shock
-    bypassShock.write(Output);
-
-    // Kontrol suspensi pneumatic
-    if (tiltAngle > 10) {
-        digitalWrite(pneumaticValve, HIGH); // Naikkan suspensi
+    if (suspensionMode) {
+        activateAdaptiveSuspension();
     } else {
-        digitalWrite(pneumaticValve, LOW); // Turunkan suspensi
+        normalSuspension();
     }
 
     delay(100);
+}
+
+void activateAdaptiveSuspension() {
+    digitalWrite(RELAY_COILOVERS, HIGH);
+    digitalWrite(RELAY_BYPASS, HIGH);
+    digitalWrite(PNEUMATIC_ACTUATOR, HIGH);
+    bypassServo.write(90);
+    Serial.println("Adaptive Suspension: ACTIVE");
+}
+
+void normalSuspension() {
+    digitalWrite(RELAY_COILOVERS, LOW);
+    digitalWrite(RELAY_BYPASS, LOW);
+    digitalWrite(PNEUMATIC_ACTUATOR, LOW);
+    bypassServo.write(0);
+    Serial.println("Adaptive Suspension: NORMAL");
 }
