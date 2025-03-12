@@ -2,204 +2,200 @@
 #include <Servo.h>
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
-#include <Adafruit_SSD1306.h>
 
-// ** OLED Display Config **
-#define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 64
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
-
-// ** Sensors & Actuators **
-Adafruit_MPU6050 mpu; // Gyroscope
-
+// Sensor and Actuator Pins
 #define HEIGHT_SENSOR A0
 #define PRESSURE_SENSOR A1
-#define BUTTON_MODE 2
-#define BUTTON_MANUAL_UP 3
-#define BUTTON_MANUAL_DOWN 4
-#define BUTTON_STIFFNESS 5
-#define BUTTON_CALIBRATE 6
-#define RELAY_COILOVERS 7
-#define RELAY_BYPASS 8
-#define PNEUMATIC_ACTUATOR 9
-#define SERVO_DAMPING 10
-#define LED_STATUS_GREEN 11
-#define LED_STATUS_YELLOW 12
-#define LED_STATUS_RED 13
+#define GYRO_MPU6050 A2
+
+// Buttons
+#define BUTTON_AUTO_HEIGHT 2
+#define BUTTON_SOFT 3
+#define BUTTON_NORMAL 4
+#define BUTTON_HARD 5
+#define BUTTON_RESET_DAMPING 6
+#define BUTTON_RESET_HEIGHT 7
+#define BUTTON_MANUAL_HEIGHT 8
+
+// 3-Way Switch for Manual Height
+#define SWITCH_HEIGHT_UP 9
+#define SWITCH_HEIGHT_DOWN 10
+
+// Actuators
+#define AIR_TANK_ACTUATOR 11
+#define AIR_RELEASE_VALVE 12
+#define RELAY_COILOVERS 13
+#define RELAY_BYPASS A3
+#define PNEUMATIC_ACTUATOR A4
+
+// LED Indicators
+#define LED_GREEN A5
+#define LED_YELLOW A6
+#define LED_RED A7
 
 Servo bypassServo;
+Adafruit_MPU6050 mpu;
 int heightValue, pressureValue;
-bool adaptiveMode = false;
-int suspensionMode = 0; // 0 = Normal, 1 = Adaptive, 2 = Off-Road, 3 = Manual, 4 = Calibration
-float tiltAngle = 0, slopeAngle = 0;
-
-// Pressure & Height Constants
-const int MIN_PRESSURE = 200;  
-const int MAX_PRESSURE = 800;  
-const int TARGET_HEIGHT = 600;
-const float MAX_TILT_ANGLE = 15.0;  // If tilt is more than 15°, auto-correct
-const float MAX_SLOPE_ANGLE = 10.0; // Only adjust height if slope >10°
-
-// PID Control Variables
-float Kp = 2.5, Ki = 0.1, Kd = 1.2;
-float prevError = 0, integral = 0;
+bool systemOn = false;
+bool manualHeightMode = false;
+int suspensionMode = 1; // 0 = Soft, 1 = Normal, 2 = Stiff
+bool autoHeightEnabled = false;
+unsigned long inclineStartTime = 0; // To track incline duration
 
 void setup() {
-    Serial.begin(115200);
+    Serial.begin(9600);
     Wire.begin();
 
-    // ** Initialize Display **
-    if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-        Serial.println(F("SSD1306 initialization failed"));
-    } else {
-        display.clearDisplay();
-        display.setTextSize(1);
-        display.setTextColor(WHITE);
-        display.setCursor(0, 10);
-        display.println("Adaptive Suspension Ready");
-        display.display();
-    }
-
-    // ** Initialize Gyroscope (MPU6050) **
+    // Initialize MPU6050
     if (!mpu.begin()) {
-        Serial.println("MPU6050 failed to initialize!");
-        digitalWrite(LED_STATUS_RED, HIGH); // Indicate Error
+        Serial.println("MPU6050 initialization failed!");
+        digitalWrite(LED_RED, HIGH);
         while (1);
     }
 
-    // ** Pin Modes **
-    pinMode(BUTTON_MODE, INPUT_PULLUP);
-    pinMode(BUTTON_MANUAL_UP, INPUT_PULLUP);
-    pinMode(BUTTON_MANUAL_DOWN, INPUT_PULLUP);
-    pinMode(BUTTON_STIFFNESS, INPUT_PULLUP);
-    pinMode(BUTTON_CALIBRATE, INPUT_PULLUP);
-    
+    // Button Inputs
+    pinMode(BUTTON_AUTO_HEIGHT, INPUT_PULLUP);
+    pinMode(BUTTON_SOFT, INPUT_PULLUP);
+    pinMode(BUTTON_NORMAL, INPUT_PULLUP);
+    pinMode(BUTTON_HARD, INPUT_PULLUP);
+    pinMode(BUTTON_RESET_DAMPING, INPUT_PULLUP);
+    pinMode(BUTTON_RESET_HEIGHT, INPUT_PULLUP);
+    pinMode(BUTTON_MANUAL_HEIGHT, INPUT_PULLUP);
+
+    // 3-Way Switch
+    pinMode(SWITCH_HEIGHT_UP, INPUT_PULLUP);
+    pinMode(SWITCH_HEIGHT_DOWN, INPUT_PULLUP);
+
+    // Actuators & Relays
+    pinMode(AIR_TANK_ACTUATOR, OUTPUT);
+    pinMode(AIR_RELEASE_VALVE, OUTPUT);
     pinMode(RELAY_COILOVERS, OUTPUT);
     pinMode(RELAY_BYPASS, OUTPUT);
     pinMode(PNEUMATIC_ACTUATOR, OUTPUT);
-    
-    pinMode(LED_STATUS_GREEN, OUTPUT);
-    pinMode(LED_STATUS_YELLOW, OUTPUT);
-    pinMode(LED_STATUS_RED, OUTPUT);
+    bypassServo.attach(A8);
 
-    bypassServo.attach(SERVO_DAMPING);
-    digitalWrite(LED_STATUS_GREEN, LOW);
-    digitalWrite(LED_STATUS_YELLOW, LOW);
-    digitalWrite(LED_STATUS_RED, LOW);
-
-    Serial.println("System Initialized.");
+    // LED Indicators
+    pinMode(LED_GREEN, OUTPUT);
+    pinMode(LED_YELLOW, OUTPUT);
+    pinMode(LED_RED, OUTPUT);
 }
 
 void loop() {
-    // Read Sensors
     heightValue = analogRead(HEIGHT_SENSOR);
     pressureValue = analogRead(PRESSURE_SENSOR);
-
-    // ** Read Gyroscope Data **
     sensors_event_t a, g, temp;
     mpu.getEvent(&a, &g, &temp);
-    slopeAngle = atan2(a.acceleration.x, a.acceleration.z) * 180 / PI;
-    tiltAngle = atan2(a.acceleration.y, a.acceleration.z) * 180 / PI;
 
-    Serial.print("Height: ");
-    Serial.print(heightValue);
-    Serial.print(" | Pressure: ");
-    Serial.print(pressureValue);
-    Serial.print(" | Slope: ");
-    Serial.print(slopeAngle);
-    Serial.print(" | Tilt: ");
-    Serial.println(tiltAngle);
+    float pitch = a.acceleration.y;
+    float roll = a.acceleration.x;
 
-    // ** Switch Mode on Button Press **
-    if (digitalRead(BUTTON_MODE) == LOW) {
-        suspensionMode = (suspensionMode + 1) % 5; // Cycle through 5 modes
-        digitalWrite(LED_STATUS_GREEN, suspensionMode > 0 ? HIGH : LOW);
-        displayMode();
-        delay(500);  // Debounce
+    Serial.print("Height: "); Serial.print(heightValue);
+    Serial.print(" | Pressure: "); Serial.print(pressureValue);
+    Serial.print(" | Pitch: "); Serial.print(pitch);
+    Serial.print(" | Roll: "); Serial.println(roll);
+
+    // Button Handlers
+    if (digitalRead(BUTTON_AUTO_HEIGHT) == LOW) {
+        autoHeightEnabled = !autoHeightEnabled;
+        delay(500);
+    }
+    
+    if (digitalRead(BUTTON_SOFT) == LOW) {
+        setSuspensionMode(0);
+    }
+    if (digitalRead(BUTTON_NORMAL) == LOW) {
+        setSuspensionMode(1);
+    }
+    if (digitalRead(BUTTON_HARD) == LOW) {
+        setSuspensionMode(2);
+    }
+    if (digitalRead(BUTTON_RESET_DAMPING) == LOW) {
+        resetSuspension();
+    }
+    if (digitalRead(BUTTON_RESET_HEIGHT) == LOW) {
+        resetHeight();
+    }
+    if (digitalRead(BUTTON_MANUAL_HEIGHT) == LOW) {
+        manualHeightMode = !manualHeightMode;
+        autoHeightEnabled = false; // Auto Mode OFF when Manual is ON
+        delay(500);
     }
 
-    // ** Apply Selected Suspension Mode **
-    if (suspensionMode == 1) adaptiveSuspension();
-    else if (suspensionMode == 2) offRoadMode();
-    else if (suspensionMode == 3) manualControl();
-    else if (suspensionMode == 4) calibrateSystem();
-    else normalSuspension();
+    // Height Control
+    if (manualHeightMode) {
+        if (digitalRead(SWITCH_HEIGHT_UP) == LOW) {
+            adjustHeight(true);
+        } else if (digitalRead(SWITCH_HEIGHT_DOWN) == LOW) {
+            adjustHeight(false);
+        }
+    } else if (autoHeightEnabled) {
+        handleAutoHeight(pitch, roll);
+    }
 
     delay(100);
 }
 
-// ** Adaptive Suspension Mode **
-void adaptiveSuspension() {
-    // ** Auto Leveling on Slope **
-    if (slopeAngle > MAX_SLOPE_ANGLE) {
-        analogWrite(PNEUMATIC_ACTUATOR, 200); // Lift
+void setSuspensionMode(int mode) {
+    if (mode == 0) {
+        // Soft Mode
+        digitalWrite(AIR_TANK_ACTUATOR, HIGH);  // Send air to shocks
+        digitalWrite(RELAY_COILOVERS, LOW);
+        digitalWrite(RELAY_BYPASS, LOW);
+        bypassServo.write(10);
+        Serial.println("Soft Mode: 20 PSI | 1 Turn");
+    } else if (mode == 1) {
+        // Normal Mode
+        digitalWrite(AIR_TANK_ACTUATOR, LOW);
+        digitalWrite(RELAY_COILOVERS, HIGH);
+        digitalWrite(RELAY_BYPASS, LOW);
+        bypassServo.write(30);
+        Serial.println("Normal Mode: 50 PSI | 3 Turns");
+    } else if (mode == 2) {
+        // Stiff Mode
+        digitalWrite(AIR_TANK_ACTUATOR, HIGH);
+        digitalWrite(AIR_RELEASE_VALVE, LOW);
+        digitalWrite(RELAY_COILOVERS, HIGH);
+        digitalWrite(RELAY_BYPASS, HIGH);
+        bypassServo.write(50);
+        Serial.println("Stiff Mode: 80 PSI | 5 Turns");
+    }
+}
+
+void handleAutoHeight(float pitch, float roll) {
+    if (abs(pitch) > 10) {
+        if (inclineStartTime == 0) {
+            inclineStartTime = millis();
+        } else if (millis() - inclineStartTime > 4000) {
+            Serial.println("Incline Detected for 4s! Adjusting Height...");
+            if (pitch > 10) {
+                adjustHeight(true); // Raise Front
+            } else {
+                adjustHeight(false); // Lower Front
+            }
+            inclineStartTime = 0;
+        }
     } else {
-        analogWrite(PNEUMATIC_ACTUATOR, 0);
-    }
-
-    // ** Side Tilt Correction **
-    if (tiltAngle > MAX_TILT_ANGLE) {
-        digitalWrite(RELAY_BYPASS, HIGH); // Raise left side
-    } else if (tiltAngle < -MAX_TILT_ANGLE) {
-        digitalWrite(RELAY_COILOVERS, HIGH); // Raise right side
-    }
-
-    // ** PID-based height control **
-    float pidOutput = pidControl(TARGET_HEIGHT, heightValue);
-    analogWrite(PNEUMATIC_ACTUATOR, constrain(pidOutput, 0, 255));
-
-    Serial.println("✅ Adaptive Suspension: ACTIVE");
-}
-
-// ** Off-Road Mode - Higher Suspension Height, Softer Ride **
-void offRoadMode() {
-    Serial.println("🚜 Switching to OFF-ROAD mode...");
-    digitalWrite(RELAY_COILOVERS, LOW);
-    digitalWrite(RELAY_BYPASS, HIGH);
-    bypassServo.write(120);
-    analogWrite(PNEUMATIC_ACTUATOR, 180);
-}
-
-// ** Manual Mode - User Controlled **
-void manualControl() {
-    if (digitalRead(BUTTON_MANUAL_UP) == LOW) {
-        analogWrite(PNEUMATIC_ACTUATOR, 255); // Lift Up
-    } 
-    if (digitalRead(BUTTON_MANUAL_DOWN) == LOW) {
-        analogWrite(PNEUMATIC_ACTUATOR, 0); // Lower Down
-    }
-    if (digitalRead(BUTTON_STIFFNESS) == LOW) {
-        bypassServo.write(180); // Stiffer Suspension
+        inclineStartTime = 0;
     }
 }
 
-// ** Calibration Mode - Checks Pressure & Sensors **
-void calibrateSystem() {
-    digitalWrite(LED_STATUS_YELLOW, HIGH);
-    Serial.println("⚙ Calibration Mode: Checking Sensors...");
-    if (pressureValue < MIN_PRESSURE) {
-        Serial.println("⚠ Pressure too LOW!");
-    } else if (pressureValue > MAX_PRESSURE) {
-        Serial.println("⚠ Pressure too HIGH!");
+void adjustHeight(bool increase) {
+    if (increase) {
+        digitalWrite(PNEUMATIC_ACTUATOR, HIGH);
+        Serial.println("Height Increasing...");
+    } else {
+        digitalWrite(PNEUMATIC_ACTUATOR, LOW);
+        Serial.println("Height Decreasing...");
     }
-    delay(3000);
-    digitalWrite(LED_STATUS_YELLOW, LOW);
 }
 
-// ** Normal Suspension Mode **
-void normalSuspension() {
-    digitalWrite(RELAY_COILOVERS, LOW);
-    digitalWrite(RELAY_BYPASS, LOW);
+void resetSuspension() {
+    digitalWrite(AIR_TANK_ACTUATOR, LOW);
+    digitalWrite(AIR_RELEASE_VALVE, HIGH);
+    Serial.println("Suspension Reset to Normal");
+}
+
+void resetHeight() {
     digitalWrite(PNEUMATIC_ACTUATOR, LOW);
-    bypassServo.write(0);
-    Serial.println("🚗 Normal Suspension: ACTIVE");
-}
-
-// ** PID Control Function for Height Regulation **
-float pidControl(float setpoint, float current) {
-    float error = setpoint - current;
-    integral += error;
-    float derivative = error - prevError;
-    prevError = error;
-    return (Kp * error) + (Ki * integral) + (Kd * derivative);
+    Serial.println("Height Reset to Normal");
 }
